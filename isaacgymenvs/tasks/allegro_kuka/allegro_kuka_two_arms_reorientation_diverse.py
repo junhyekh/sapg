@@ -1,14 +1,20 @@
 import os
+import math
 from typing import List
-
+import numpy as np
 import torch
 from isaacgym import gymapi
 from torch import Tensor
+import tempfile
+from tqdm.auto import tqdm
 
 from isaacgymenvs.utils.torch_jit_utils import to_torch, torch_rand_float
+from isaacgymenvs.tasks.allegro_kuka.allegro_kuka_utils import DofParameters, populate_dof_properties
+
 from isaacgymenvs.tasks.allegro_kuka.allegro_kuka_two_arms import AllegroKukaTwoArmsBase
 from isaacgymenvs.tasks.allegro_kuka.allegro_kuka_utils import tolerance_curriculum, tolerance_successes_objective
-
+from isaacgymenvs.tasks.object.mesh_object_set import MeshObjectSet
+from isaacgymenvs.utils.torch_jit_utils import *
 
 class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
     """
@@ -56,7 +62,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         object_asset_root = asset_root
         tmp_assets_dir = tempfile.TemporaryDirectory()
         self.object_asset_files, self.object_asset_scales = self._main_object_assets_and_scales(
-            object_asset_root, tmp_assets_dir.name
+            object_asset_root, tmp_assets_dir.name,
         )
 
         asset_options = gymapi.AssetOptions()
@@ -124,8 +130,6 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
                 arm_pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), -math.pi / 2)
 
         object_assets, object_rb_count, object_shapes_count = self._load_main_object_asset()
-        max_agg_bodies += object_rb_count
-        max_agg_shapes += object_shapes_count
 
         table_asset_options = gymapi.AssetOptions()
         table_asset_options.disable_gravity = False
@@ -138,8 +142,9 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
                                                 table_tmp_assets_dir.name, 
                                                 num_table_assets=1) # FIXME: num_table_assets should be a variable
         # Load table assets
-        table_assets, table_rb_count, table_shapes_count = self._load_table_assets(table_asset,
-                                                            table_asset_options)
+        table_assets, table_rb_count, table_shapes_count = self._load_table_assets(asset_root,
+                                                                                    table_asset,
+                                                                                    table_asset_options)
 
         table_pose = gymapi.Transform()
         table_pose.p = gymapi.Vec3()
@@ -155,7 +160,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         # max_agg_shapes += table_shapes_count
 
         # load auxiliary objects
-        additional_rb, additional_shapes = self._load_additional_assets(object_asset_root, arm_y_ofs)
+        self._load_additional_assets(object_asset_root, arm_y_ofs)
         # max_agg_bodies += additional_rb
         # max_agg_shapes += additional_shapes
 
@@ -182,7 +187,8 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             self.allegro_fingertip_handles.extend([h + arm_idx * num_hand_arm_bodies for h in fingertip_handles])
 
         # does this rely on the fact that objects are added right after the arms in terms of create_actor()?
-        self.object_rb_handles = list(range(all_arms_bodies, all_arms_bodies + object_rb_count))
+        # FIXME: this is a hack, we are not sure this is correct
+        self.object_rb_handles = list(range(all_arms_bodies, all_arms_bodies + object_rb_count[0]))
 
         self.arm_indices = torch.empty([self.num_envs, self.num_arms], dtype=torch.long, device=self.device)
         self.object_indices = torch.empty(self.num_envs, dtype=torch.long, device=self.device)
@@ -207,10 +213,8 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             agg_shapes += table_shapes_count[table_asset_idx]
 
             # add auxiliary objects
-            goal_asset_idx = i % len(self.goal_assets)
-            goal_asset = self.goal_assets[goal_asset_idx]
-            agg_bodies += additional_rb[goal_asset_idx]
-            agg_shapes += additional_shapes[goal_asset_idx]
+            agg_bodies += object_rb_count[object_asset_idx]
+            agg_shapes += object_shapes_count[object_asset_idx]
             
             self.gym.begin_aggregate(env_ptr, agg_bodies, agg_shapes, True)
 
@@ -239,14 +243,14 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
 
             object_scale = self.object_asset_scales[object_asset_idx]
             object_scales.append(object_scale)
-            object_offsets = []
-            for keypoint in self.keypoints_offsets:
-                keypoint = copy(keypoint)
-                for coord_idx in range(3):
-                    keypoint[coord_idx] *= object_scale[coord_idx] * self.object_base_size * self.keypoint_scale / 2
-                object_offsets.append(keypoint)
+            # object_offsets = []
+            # for keypoint in self.keypoints_offsets:
+            #     keypoint = copy(keypoint)
+            #     for coord_idx in range(3):
+            #         keypoint[coord_idx] *= object_scale[coord_idx] * self.object_base_size * self.keypoint_scale / 2
+            #     object_offsets.append(keypoint)
 
-            object_keypoint_offsets.append(object_offsets)
+            object_keypoint_offsets.append(self._bbox[object_asset_idx])
 
             # table object
             table_handle = self.gym.create_actor(env_ptr, table_asset, table_pose, "table_object", i, 0, 0)
@@ -288,6 +292,71 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             tmp_assets_dir.cleanup()
         except Exception:
             pass
+
+    """
+    Asset functions
+    """
+
+    def _main_object_assets_and_scales(self, 
+                                        object_asset_root,
+                                        tmp_assets_dir):
+        """
+        Load main object assets and scales.
+        """
+
+        self._object_set = MeshObjectSet(MeshObjectSet.Config(
+            **(self.cfg["env"]["mesh_object_set"])
+        ))
+
+        obj_keys = list(self._object_set.keys()) * self.cfg["env"]["num_object_repeats"]
+        obj_keys = np.random.permutation(obj_keys)
+        
+        scale = np.random.uniform(self.cfg["env"]["object_scale_range"][0],
+                                  self.cfg["env"]["object_scale_range"][1],
+                                  size=len(obj_keys))
+        object_asset_files = [self._object_set.urdf(key) for key in obj_keys]
+        radius = [self._object_set.radius(key) for key in obj_keys]
+        rel_scale = [s/r for s, r in zip(scale, radius)]
+        bbox = [self._object_set.bbox(key) for key in obj_keys]
+        bbox = np.asarray(bbox, dtype=np.float32)
+        bbox = bbox * np.array(rel_scale, dtype=np.float32)[:, None, None]
+        object_asset_scales = np.max(bbox, axis=-2) - np.min(bbox, axis=-2)
+        cloud = np.array([self._object_set.cloud(key) for key in obj_keys])
+        self._cloud = cloud[..., :3] * np.array(rel_scale, dtype=np.float32)[:, None, None]
+        self._bbox = bbox[..., np.array([0,1,-2,-1]), :]
+        print("-"*30)
+        print(f"bbox: {self._bbox.shape}")
+        print(f"bbox_pre: {bbox.shape}")
+        print("-"*30)
+        return object_asset_files, object_asset_scales
+
+
+    def _load_main_object_asset(self):
+        """
+        Load main object asset.
+        """
+        object_asset_options = gymapi.AssetOptions()
+        object_asset_options.disable_gravity = False
+        object_asset_options.fix_base_link = False
+        object_asset_options.override_com = True
+        object_asset_options.override_inertia = True
+        object_asset_options.density = 200.0
+        object_asset_options.thickness = 0.001
+        object_asset_options.convex_decomposition_from_submeshes = True
+
+        object_assets = []
+        object_rb_count = []
+        object_shapes_count = []
+        for object_asset_file in tqdm(self.object_asset_files,
+                                      desc='create_object_assets'):
+            object_asset_dir = os.path.dirname(object_asset_file)
+            object_asset_fname = os.path.basename(object_asset_file)
+            object_asset_ = self.gym.load_asset(self.sim, object_asset_dir, object_asset_fname, object_asset_options)
+            object_assets.append(object_asset_)
+            object_rb_count.append(self.gym.get_asset_rigid_body_count(object_asset_))
+            object_shapes_count.append(self.gym.get_asset_rigid_shape_count(object_asset_))
+        return object_assets, object_rb_count, object_shapes_count
+        
         
     def _define_table_asset(self, table_asset_root, tmp_assets_dir,
                            num_table_assets):
@@ -297,12 +366,13 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         Convert it to urdf.
         return table assets, obstacle_informations
         """
-        table_path = os.path.join(table_asset_root, self.asset_files_dict["table"])
-        table_assets = [table_path] * num_table_assets
+        # table_path = os.path.join(table_asset_root, self.asset_files_dict["table"]).resolve()
+        table_assets = [self.asset_files_dict["table"]] * num_table_assets
 
         return table_assets
 
     def _load_table_assets(self,
+                            asset_root,
                             table_assets,
                             table_asset_options):
         """
@@ -327,16 +397,11 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             object_asset_dir = os.path.dirname(object_asset_file)
             object_asset_fname = os.path.basename(object_asset_file)
 
-            goal_asset_ = self.gym.load_asset(self.sim, object_asset_dir, object_asset_fname, object_asset_options)
+            goal_asset_ = self.gym.load_asset(self.sim, 
+                                                object_asset_dir, 
+                                                object_asset_fname, 
+                                                object_asset_options)
             self.goal_assets.append(goal_asset_)
-        goal_rb_count = self.gym.get_asset_rigid_body_count(
-            self.goal_assets[0]
-        )  # assuming all of them have the same rb count
-        goal_shapes_count = self.gym.get_asset_rigid_shape_count(
-            self.goal_assets[0]
-        )  # assuming all of them have the same rb count
-
-        return goal_rb_count, goal_shapes_count
 
     def _create_additional_objects(self, env_ptr, env_idx, object_asset_idx):
         self.goal_displacement = gymapi.Vec3(-0.35, -0.06, 0.12)
@@ -358,8 +423,8 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
                 env_ptr, goal_handle, name, gymapi.DOMAIN_ENV
             )
 
-        if self.object_type != "block":
-            self.gym.set_rigid_body_color(env_ptr, goal_handle, 0, gymapi.MESH_VISUAL, gymapi.Vec3(0.6, 0.72, 0.98))
+        # if self.object_type != "block":
+        #     self.gym.set_rigid_body_color(env_ptr, goal_handle, 0, gymapi.MESH_VISUAL, gymapi.Vec3(0.6, 0.72, 0.98))
 
     def _after_envs_created(self):
         self.goal_object_indices = to_torch(self.goal_object_indices, dtype=torch.long, device=self.device)

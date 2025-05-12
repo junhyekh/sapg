@@ -89,6 +89,12 @@ def quat_rotate(q, v):
             shape[0], 3, 1)).squeeze(-1) * 2.0
     return a + b + c
 
+@torch.jit.script
+def quat_rotate_v2(q: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    q_ax = q[..., 0:3]
+    t = 2.0 * torch.cross(q_ax, x, dim=-1)
+    return x + q[..., 3:4] * t + torch.cross(q_ax, t, dim=-1)
+
 
 @torch.jit.script
 def quat_rotate_inverse(q, v):

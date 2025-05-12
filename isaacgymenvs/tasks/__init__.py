@@ -53,6 +53,7 @@ from .allegro_kuka.allegro_kuka_regrasping import AllegroKukaRegrasping
 from .allegro_kuka.allegro_kuka_throw import AllegroKukaThrow
 from .allegro_kuka.allegro_kuka_two_arms_regrasping import AllegroKukaTwoArmsRegrasping
 from .allegro_kuka.allegro_kuka_two_arms_reorientation import AllegroKukaTwoArmsReorientation
+from .allegro_kuka.allegro_kuka_two_arms_reorientation_diverse import AllegroKukaTwoArmsReorientationDiverse
 
 from .industreal.industreal_task_pegs_insert import IndustRealTaskPegsInsert
 from .industreal.industreal_task_gears_insert import IndustRealTaskGearsInsert
@@ -77,6 +78,7 @@ def resolve_allegro_kuka_two_arms(cfg, *args, **kwargs):
     subtask_map = dict(
         reorientation=AllegroKukaTwoArmsReorientation,
         regrasping=AllegroKukaTwoArmsRegrasping,
+        diverse=AllegroKukaTwoArmsReorientationDiverse,
     )
 
     if subtask_name not in subtask_map:

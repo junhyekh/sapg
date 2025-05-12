@@ -328,7 +328,6 @@ class AllegroKukaTwoArmsBase(VecTask):
 
         self.rb_forces = torch.zeros((self.num_envs, self.num_bodies, 3), dtype=torch.float, device=self.device)
         self.action_torques = torch.zeros((self.num_envs, self.num_bodies, 3), dtype=torch.float, device=self.device)
-
         self.obj_keypoint_pos = torch.zeros(
             (self.num_envs, self.num_keypoints, 3), dtype=torch.float, device=self.device
         )
@@ -1078,14 +1077,21 @@ class AllegroKukaTwoArmsBase(VecTask):
 
         if self.fingertip_pos_rel_object_prev is None:
             self.fingertip_pos_rel_object_prev = self.fingertip_pos_rel_object.clone()
-
-        for i in range(self.num_keypoints):
-            self.obj_keypoint_pos[:, i] = self.object_pos + quat_rotate(
-                self.object_rot, self.object_keypoint_offsets[:, i]
-            )
-            self.goal_keypoint_pos[:, i] = self.goal_pos + quat_rotate(
-                self.goal_rot, self.object_keypoint_offsets[:, i]
-            )
+        # raise ValueError(f"{self.num_keypoints}, {self.object_keypoint_offsets.shape}")
+        # for i in range(self.num_keypoints):
+        #     self.obj_keypoint_pos[:, i] = self.object_pos + quat_rotate(
+        #         self.object_rot, self.object_keypoint_offsets[:, i]
+        #     )
+        #     self.goal_keypoint_pos[:, i] = self.goal_pos + quat_rotate(
+        #         self.goal_rot, self.object_keypoint_offsets[:, i]
+        #     )
+        
+        self.obj_keypoint_pos[:] = self.object_pos[..., None, :] + quat_rotate_v2(
+            self.object_rot[..., None, :], self.object_keypoint_offsets
+        )
+        self.goal_keypoint_pos[:] = self.goal_pos[..., None, :] + quat_rotate_v2(
+            self.goal_rot[..., None, :], self.object_keypoint_offsets
+        )
 
         self.keypoints_rel_goal = self.obj_keypoint_pos - self.goal_keypoint_pos
 
