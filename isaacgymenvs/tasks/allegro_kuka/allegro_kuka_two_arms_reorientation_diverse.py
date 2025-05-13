@@ -42,6 +42,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         self.goal_object_indices = []
         self.goal_assets = []
+        self.table_asset_ids = []
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
@@ -212,6 +213,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             table_asset = table_assets[table_asset_idx]
             agg_bodies += table_rb_count[table_asset_idx]
             agg_shapes += table_shapes_count[table_asset_idx]
+            self.table_asset_ids.append(table_asset_idx)
 
             # add auxiliary objects
             agg_bodies += object_rb_count[object_asset_idx]
@@ -401,18 +403,25 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             return urdf.join(box_urdf, link=urdf.links[0], origin=origin)
 
         table_assets = []
+        table_assets_barriers_xyzwh = []
         for i, barrier_cfg in enumerate(self.barriers_cfg):
             # To ensure the rigid body num is same acrros envs.
             barriers_num = barrier_cfg["num"]
             new_urdf = table_urdf
+            barriers_xyzwh = []
             for j in range(max_barriers_num):
-                size = (0.1, *barrier_cfg["wh"][j%barriers_num])
+                wh = barrier_cfg["wh"][j%barriers_num]
+                xyz = barrier_cfg["xyz"][j%barriers_num]
+                size = (0.1, *wh)
                 origin = np.eye(4)
-                origin[0:3, 3] = barrier_cfg["xyz"][j%barriers_num]
+                origin[0:3, 3] = xyz
                 new_urdf = add_box_to_urdf(new_urdf, f'barrier{j}', size, origin)
+                barriers_xyzwh.extend(xyz + wh)
             new_urdf_filename = f'{os.path.basename(self.asset_files_dict["table"]).replace(".urdf", f"_barrier_{i}.urdf")}'
             new_urdf.save(os.path.join(tmp_assets_dir, new_urdf_filename))
             table_assets.append(new_urdf_filename)
+            table_assets_barriers_xyzwh.append(barriers_xyzwh)
+        self.table_assets_barriers_xyzwh = torch.tensor(table_assets_barriers_xyzwh, dtype=torch.float32, device=self.device)
 
         return table_assets
 
