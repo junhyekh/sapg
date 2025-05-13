@@ -15,8 +15,14 @@ from trimesh.visual import color as color_visual
 from tqdm.auto import tqdm
 
 from icecream import ic
-
-from functools import cached_property, partial
+try:
+    # python >= 3.8
+    from functools import cached_property, partial
+except:
+    # python < 3.8
+    from functools import lru_cache, partial
+    def cached_property(func):
+        return property(lru_cache()(func))
 
 
 from isaacgymenvs.tasks.object.util import load_glb, load_npy, load_pkl, sample_stable_poses

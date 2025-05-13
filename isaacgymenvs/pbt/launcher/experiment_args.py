@@ -25,6 +25,7 @@ def add_experiment_args(parser):
     parser.add_argument("--sparse-reward", action='store_true', help="Whether to use sparse reward")
     parser.add_argument("--episode-length", default=None, type=int, help="Episode length")
     parser.add_argument("--seed", default=0, type=int, help="Random seed")
+    parser.add_argument("--no-headless", default=False, action='store_true', help="Disable headless mode")
     
     parser.add_argument("--num-envs", default=8192, type=int, help="Number of parallel environments")
     parser.add_argument("--num-policies", default=8, type=int, help="Number of policies to train")
@@ -34,7 +35,7 @@ def add_experiment_args(parser):
     parser.add_argument("--multi-gpu", action='store_true', help="Whether to use multi gpu")
     parser.add_argument("--max-iterations", default=None, type=int, help="Max iterations")
 
-    parser.add_argument("--wandb-activate", default=True, type=bool, help="Whether to activate wandb")
+    parser.add_argument("--wandb-deactivate", default=False, action='store_true', help="Whether to activate wandb")
     parser.add_argument("--wandb-entity", default="", type=str, help="Wandb entity")
     parser.add_argument("--wandb-project", default="sapg", type=str, help="Wandb project")
     parser.add_argument("--wandb-tags", default='[]', type=str, help="Wandb tags formatted as [t1,t2]")
@@ -114,7 +115,7 @@ def get_experiment_run_description(args):
            + f'task={env_dict[args.env]}{"LSTM" if args.lstm else ""} ' + (f'task/env={args.task} ' if 'allegro_kuka' in args.env else '')
            + f'++task.env.useSparseReward={args.sparse_reward} '
            + (f'pbt=pbt_default pbt.workspace=workspace ' if args.pbt else '')
-           + f'headless=True '
+           + f'headless={not args.no_headless} '
            + (f'max_iterations={args.max_iterations} train.params.config.save_frequency={min(2000, args.max_iterations/10)} ' if args.max_iterations else '')
            + (f'task.env.episodeLength={args.episode_length} ' if args.episode_length else '')
            + f'task.env.numEnvs={args.num_envs} train.params.config.minibatch_size={args.minibatch_size} multi_gpu={args.multi_gpu} '
@@ -126,7 +127,7 @@ def get_experiment_run_description(args):
            + (f'train.params.network.space.continuous.fixed_sigma={args.sigma} ')
            + (f'checkpoint={args.checkpoint} ' if args.checkpoint else '')
            + (" ".join(args.extra_args) + " " if args.extra_args else "")
-           + f'wandb_project={args.wandb_project}_{name_prefix} wandb_entity={args.wandb_entity} wandb_activate={args.wandb_activate} wandb_group={name_suffix} wandb_tags={args.wandb_tags} ++wandb_notes=\'{args.wandb_notes}\'')
+           + f'wandb_project={args.wandb_project}_{name_prefix} wandb_entity={args.wandb_entity} wandb_activate={not args.wandb_deactivate} wandb_group={name_suffix} wandb_tags={args.wandb_tags} ++wandb_notes=\'{args.wandb_notes}\'')
     
     if args.pbt:
         # don't set seed for PBT

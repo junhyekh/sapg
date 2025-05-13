@@ -1,2 +1,16 @@
 # reorientation is a default task
 subtask: "diverse"
+
+barriers:
+  - num: 1
+    xyz:  # wrt the table frame
+      - [0.0, 0.0, 0.4]
+    wh:   # y,z wrt the table frame
+      - [0.3, 0.3]
+  - num: 2
+    xyz:
+      - [0.0, 0.2, 0.3]
+      - [0.0, -0.2, 0.3]
+    wh:
+      - [0.2, 0.3]
+      - [0.2, 0.3]

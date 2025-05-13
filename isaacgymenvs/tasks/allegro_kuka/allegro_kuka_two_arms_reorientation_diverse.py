@@ -7,6 +7,7 @@ from isaacgym import gymapi
 from torch import Tensor
 import tempfile
 from tqdm.auto import tqdm
+import urdfpy
 
 from isaacgymenvs.utils.torch_jit_utils import to_torch, torch_rand_float
 from isaacgymenvs.tasks.allegro_kuka.allegro_kuka_utils import DofParameters, populate_dof_properties
@@ -142,9 +143,9 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
                                                 table_tmp_assets_dir.name, 
                                                 num_table_assets=1) # FIXME: num_table_assets should be a variable
         # Load table assets
-        table_assets, table_rb_count, table_shapes_count = self._load_table_assets(asset_root,
-                                                                                    table_asset,
-                                                                                    table_asset_options)
+        table_assets, table_rb_count, table_shapes_count = self._load_table_assets(table_tmp_assets_dir.name,
+                                                                                table_asset,
+                                                                                table_asset_options)
 
         table_pose = gymapi.Transform()
         table_pose.p = gymapi.Vec3()
@@ -366,8 +367,52 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         Convert it to urdf.
         return table assets, obstacle_informations
         """
-        # table_path = os.path.join(table_asset_root, self.asset_files_dict["table"]).resolve()
-        table_assets = [self.asset_files_dict["table"]] * num_table_assets
+        table_path = os.path.join(table_asset_root, self.asset_files_dict["table"])
+        table_urdf = urdfpy.URDF.load(table_path)
+
+        self.barriers_cfg = self.cfg["env"]["barriers"]
+        max_barriers_num = max([barrier["num"] for barrier in self.barriers_cfg])
+
+        def add_box_to_urdf(urdf: urdfpy.URDF, name: str, size: np.ndarray, origin: np.ndarray):
+            geom = urdfpy.Geometry(urdfpy.Box(size=size))
+            visual = urdfpy.Visual(
+                geometry=geom,
+                name=f'{name}_vis',
+                origin=np.eye(4),
+                material=urdfpy.Material(name=name, color=[0.6, 0.6, 0.6, 1.0]),
+            )
+            collision = urdfpy.Collision(
+                geometry=geom,
+                name=f'{name}_col',
+                origin=np.eye(4),
+            )
+            link = urdfpy.Link(
+                name=f'{name}_link',
+                visuals=[visual],
+                collisions=[collision],
+                inertial=urdfpy.Inertial(1000, 1000*np.eye(3))
+            )
+
+            box_urdf = urdfpy.URDF(
+                name=name,
+                links=[link],
+            )
+
+            return urdf.join(box_urdf, link=urdf.links[0], origin=origin)
+
+        table_assets = []
+        for i, barrier_cfg in enumerate(self.barriers_cfg):
+            # To ensure the rigid body num is same acrros envs.
+            barriers_num = barrier_cfg["num"]
+            new_urdf = table_urdf
+            for j in range(max_barriers_num):
+                size = (0.1, *barrier_cfg["wh"][j%barriers_num])
+                origin = np.eye(4)
+                origin[0:3, 3] = barrier_cfg["xyz"][j%barriers_num]
+                new_urdf = add_box_to_urdf(new_urdf, f'barrier{j}', size, origin)
+            new_urdf_filename = f'{os.path.basename(self.asset_files_dict["table"]).replace(".urdf", f"_barrier_{i}.urdf")}'
+            new_urdf.save(os.path.join(tmp_assets_dir, new_urdf_filename))
+            table_assets.append(new_urdf_filename)
 
         return table_assets
 
