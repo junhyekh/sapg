@@ -8,6 +8,7 @@ from torch import Tensor
 import tempfile
 from tqdm.auto import tqdm
 import urdfpy
+from torchvision.ops.boxes import _box_inter_union, box_area
 
 from isaacgymenvs.utils.torch_jit_utils import to_torch, torch_rand_float
 from isaacgymenvs.tasks.allegro_kuka.allegro_kuka_utils import DofParameters, populate_dof_properties
@@ -369,12 +370,6 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         Convert it to urdf.
         return table assets, obstacle_informations
         """
-        table_path = os.path.join(table_asset_root, self.asset_files_dict["table"])
-        table_urdf = urdfpy.URDF.load(table_path)
-
-        self.barriers_cfg = self.cfg["env"]["barriers"]
-        max_barriers_num = max([barrier["num"] for barrier in self.barriers_cfg])
-
         def add_box_to_urdf(urdf: urdfpy.URDF, name: str, size: np.ndarray, origin: np.ndarray):
             geom = urdfpy.Geometry(urdfpy.Box(size=size))
             visual = urdfpy.Visual(
@@ -402,26 +397,91 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
 
             return urdf.join(box_urdf, link=urdf.links[0], origin=origin)
 
+        table_path = os.path.join(table_asset_root, self.asset_files_dict["table"])
+        table_urdf = urdfpy.URDF.load(table_path)
+        table_yz = torch.tensor(table_urdf.links[0].collisions[0].origin[1:3,-1], dtype=torch.float32, device=self.device)
+        table_wh = torch.tensor(table_urdf.links[0].collisions[0].geometry.box.size[1:], dtype=torch.float32, device=self.device)
+        
+        table_throw_yz = table_yz.clone()
+        table_throw_yz[1] += table_wh[1]/2 + 0.2
+        table_throw_wh = table_wh.clone()
+        table_throw_wh[1] = 0.4
+        
+        table_throw_yz_bbox = torch.tensor([
+            table_throw_yz[0] - table_throw_wh[0]/2,
+            table_throw_yz[1] - table_throw_wh[1]/2,
+            table_throw_yz[0] + table_throw_wh[0]/2,
+            table_throw_yz[1] + table_throw_wh[1]/2,
+        ], dtype=torch.float32, device=self.device)[None]
+
+        barriers_cfg = self.cfg["env"]["barriers"]
+        num_barriers = barriers_cfg["num_barriers"]
+        max_num_samples = barriers_cfg["max_num_samples"]
+        easy_max_num_samples = round(max_num_samples*barriers_cfg["easy"]["ratio"])
+        medium_max_num_samples = round(max_num_samples*barriers_cfg["medium"]["ratio"])
+        hard_max_num_samples = round(max_num_samples*barriers_cfg["hard"]["ratio"])
+
         table_assets = []
-        table_assets_barriers_xyzwh = []
-        for i, barrier_cfg in enumerate(self.barriers_cfg):
+        table_assets_barriers_yzwh = []
+
+        num_samples = 0
+        easy_num_samples = 0
+        medium_num_samples = 0
+        hard_num_samples = 0
+
+        easy_overlap_range = barriers_cfg["easy"]["overlap_range"]
+        medium_overlap_range = barriers_cfg["medium"]["overlap_range"]
+        hard_overlap_range = barriers_cfg["hard"]["overlap_range"]
+        
+        while num_samples < max_num_samples:
+            # NOTE: Should consider a single barrier?
+            barrier_yz1 = table_throw_yz + table_throw_wh/2 * (2*torch.rand(100, 2, dtype=torch.float32, device=self.device)-1)
+            barrier_wh1 = 0.3 * torch.rand(100, 2, dtype=torch.float32, device=self.device) + 0.15
+            bbox1 = torch.cat([barrier_yz1-barrier_wh1/2, barrier_yz1+barrier_wh1/2], dim=-1)
+            barrier_yz2 = table_throw_yz + table_throw_wh/2 * (2*torch.rand(100, 2, dtype=torch.float32, device=self.device)-1)
+            barrier_wh2 = 0.3 * torch.rand(100, 2, dtype=torch.float32, device=self.device) + 0.15
+            bbox2 = torch.cat([barrier_yz2-barrier_wh2/2, barrier_yz2+barrier_wh2/2], dim=-1)
+            inter0_1, _ = _box_inter_union(table_throw_yz_bbox, bbox1)
+            inter0_2, _ = _box_inter_union(table_throw_yz_bbox, bbox2)
+            inter1_2, _ = _box_inter_union(bbox1, bbox2)
+            inter0_12 = inter0_1 + inter0_2 - inter1_2.diag()
+            overlap = inter0_12 / box_area(table_throw_yz_bbox)
+
+            easy_ids = ((easy_overlap_range[0] < overlap) & (overlap < easy_overlap_range[1])).nonzero(as_tuple=True)[1][:easy_max_num_samples-easy_num_samples]
+            medium_ids = ((medium_overlap_range[0] < overlap) & (overlap < medium_overlap_range[1])).nonzero(as_tuple=True)[1][:medium_max_num_samples-medium_num_samples]
+            hard_ids = ((hard_overlap_range[0] < overlap) & (overlap < hard_overlap_range[1])).nonzero(as_tuple=True)[1][:hard_max_num_samples-hard_num_samples]
+
+            barrier_yzwh = torch.cat([
+                barrier_yz1,
+                barrier_wh1,
+                barrier_yz2,
+                barrier_wh2,
+            ], dim=-1)
+            table_assets_barriers_yzwh.append(barrier_yzwh[easy_ids])
+            table_assets_barriers_yzwh.append(barrier_yzwh[medium_ids])
+            table_assets_barriers_yzwh.append(barrier_yzwh[hard_ids])
+
+            easy_num_samples += len(easy_ids)
+            medium_num_samples += len(medium_ids)
+            hard_num_samples += len(hard_ids)
+            num_samples = easy_num_samples + medium_num_samples + hard_num_samples
+
+        self.table_assets_barriers_yzwh = torch.cat(table_assets_barriers_yzwh, dim=0)
+        assert len(self.table_assets_barriers_yzwh) == max_num_samples
+
+        for i, barriers_yzwh in enumerate(self.table_assets_barriers_yzwh.cpu().numpy()):
             # To ensure the rigid body num is same acrros envs.
-            barriers_num = barrier_cfg["num"]
             new_urdf = table_urdf
-            barriers_xyzwh = []
-            for j in range(max_barriers_num):
-                wh = barrier_cfg["wh"][j%barriers_num]
-                xyz = barrier_cfg["xyz"][j%barriers_num]
+            for j in range(num_barriers):
+                yz = barriers_yzwh[j*4:j*4+2]
+                wh = barriers_yzwh[j*4+2:j*4+4]
                 size = (0.1, *wh)
                 origin = np.eye(4)
-                origin[0:3, 3] = xyz
+                origin[1:3, 3] = yz
                 new_urdf = add_box_to_urdf(new_urdf, f'barrier{j}', size, origin)
-                barriers_xyzwh.extend(xyz + wh)
             new_urdf_filename = f'{os.path.basename(self.asset_files_dict["table"]).replace(".urdf", f"_barrier_{i}.urdf")}'
             new_urdf.save(os.path.join(tmp_assets_dir, new_urdf_filename))
             table_assets.append(new_urdf_filename)
-            table_assets_barriers_xyzwh.append(barriers_xyzwh)
-        self.table_assets_barriers_xyzwh = torch.tensor(table_assets_barriers_xyzwh, dtype=torch.float32, device=self.device)
 
         return table_assets
 
