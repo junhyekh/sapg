@@ -46,6 +46,8 @@ from isaacgymenvs.tasks.allegro_kuka.generate_cuboids import (
 )
 from isaacgymenvs.utils.torch_jit_utils import *
 
+from pytorch3d.ops import sample_farthest_points
+
 
 class AllegroKukaTwoArmsBase(VecTask):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
@@ -1090,10 +1092,13 @@ class AllegroKukaTwoArmsBase(VecTask):
         #     self.goal_keypoint_pos[:, i] = self.goal_pos + quat_rotate(
         #         self.goal_rot, self.object_keypoint_offsets[:, i]
         #     )
-        
+        t_offset = torch.full_like(self.object_keypoint_offsets, 0.05)
         self.obj_keypoint_pos[:] = self.object_pos[..., None, :] + quat_rotate_v2(
-            self.object_rot[..., None, :], self.object_keypoint_offsets
+            self.object_rot[..., None, :], t_offset
         )
+        # + quat_rotate_v2(
+        #     self.object_rot[..., None, :], self.object_keypoint_offsets
+        # )
         self.goal_keypoint_pos[:] = self.goal_pos[..., None, :] + quat_rotate_v2(
             self.goal_rot[..., None, :], self.object_keypoint_offsets
         )
@@ -1479,28 +1484,45 @@ class AllegroKukaTwoArmsBase(VecTask):
 
             sphere_pose = gymapi.Transform()
             sphere_pose.r = gymapi.Quat(0, 0, 0, 1)
-            sphere_geom = gymutil.WireframeSphereGeometry(0.01, 8, 8, sphere_pose, color=(1, 1, 0))
+            sphere_geom_tip = gymutil.WireframeSphereGeometry(0.01, 8, 8, sphere_pose, color=(0, 1, 0))
+            sphere_geom_bbox = gymutil.WireframeSphereGeometry(0.01, 8, 8, sphere_pose, color=(1, 1, 0))
+            sphere_geom_goal = gymutil.WireframeSphereGeometry(0.01, 8, 8, sphere_pose, color=(0, 1, 1))
             sphere_geom_white = gymutil.WireframeSphereGeometry(0.02, 8, 8, sphere_pose, color=(1, 1, 1))
+            sphere_geom_black = gymutil.WireframeSphereGeometry(0.02, 8, 8, sphere_pose, color=(0, 0, 0))
+            sphere_geom_pcd = gymutil.WireframeSphereGeometry(0.01, 8, 8, sphere_pose, color=(1, 0, 1))
 
             palm_center_pos_cpu = self.palm_center_pos.cpu().numpy()
             palm_rot_cpu = self._palm_rot.cpu().numpy()
 
             for i in range(self.num_envs):
-                palm_center_transform = gymapi.Transform()
-                palm_center_transform.p = gymapi.Vec3(*palm_center_pos_cpu[i])
-                palm_center_transform.r = gymapi.Quat(*palm_rot_cpu[i])
-                gymutil.draw_lines(sphere_geom_white, self.gym, self.viewer, self.envs[i], palm_center_transform)
+                for j in range(self.num_arms):
+                    palm_center_transform = gymapi.Transform()
+                    palm_center_transform.p = gymapi.Vec3(*palm_center_pos_cpu[i, j])
+                    palm_center_transform.r = gymapi.Quat(*palm_rot_cpu[i, j])
+                    if j == 0:
+                        gymutil.draw_lines(sphere_geom_black, self.gym, self.viewer, self.envs[i], palm_center_transform)
+                    else:
+                        gymutil.draw_lines(sphere_geom_white, self.gym, self.viewer, self.envs[i], palm_center_transform)
+
+            # print(self.fingertip_pos_offset.shape, self.fingertip_rot.shape,
+            #         self.num_fingertips)
+            # print(self.fingertip_pos_offset[0],
+            #       self.fingertip_pos_offset[1],
+            #       self.fingertip_offsets[0],
+            #       self.fingertip_pos[0])
 
             for j in range(self.num_fingertips):
-                fingertip_pos_cpu = self.fingertip_pos_offset[:, j].cpu().numpy()
-                fingertip_rot_cpu = self.fingertip_rot[:, j].cpu().numpy()
+                for k in range(self.num_arms):
+                    idx = j + self.num_fingertips * k
+                    fingertip_pos_cpu = self.fingertip_pos_offset[:, idx].cpu().numpy()
+                    fingertip_rot_cpu = self.fingertip_rot[:, idx].cpu().numpy()
 
-                for i in range(self.num_envs):
-                    fingertip_transform = gymapi.Transform()
-                    fingertip_transform.p = gymapi.Vec3(*fingertip_pos_cpu[i])
-                    fingertip_transform.r = gymapi.Quat(*fingertip_rot_cpu[i])
+                    for i in range(self.num_envs):
+                        fingertip_transform = gymapi.Transform()
+                        fingertip_transform.p = gymapi.Vec3(*fingertip_pos_cpu[i])
+                        fingertip_transform.r = gymapi.Quat(*fingertip_rot_cpu[i])
+                        gymutil.draw_lines(sphere_geom_tip, self.gym, self.viewer, self.envs[i], fingertip_transform)
 
-                    gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], fingertip_transform)
 
             for j in range(self.num_keypoints):
                 keypoint_pos_cpu = self.obj_keypoint_pos[:, j].cpu().numpy()
@@ -1509,8 +1531,30 @@ class AllegroKukaTwoArmsBase(VecTask):
                 for i in range(self.num_envs):
                     keypoint_transform = gymapi.Transform()
                     keypoint_transform.p = gymapi.Vec3(*keypoint_pos_cpu[i])
-                    gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], keypoint_transform)
+                    gymutil.draw_lines(sphere_geom_bbox, self.gym, self.viewer, self.envs[i], keypoint_transform)
 
                     goal_keypoint_transform = gymapi.Transform()
                     goal_keypoint_transform.p = gymapi.Vec3(*goal_keypoint_pos_cpu[i])
-                    gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], goal_keypoint_transform)
+                    gymutil.draw_lines(sphere_geom_goal, self.gym, self.viewer, self.envs[i], goal_keypoint_transform)
+
+            # draw center of object and goal
+            obj_center_pos_cpu = self.object_pos[..., :3].cpu().numpy()
+            goal_center_pos_cpu = self.goal_pos[..., :3].cpu().numpy()
+
+            # for i in range(self.num_envs):
+            #     obj_center_transform = gymapi.Transform()
+            #     obj_center_transform.p = gymapi.Vec3(*obj_center_pos_cpu[i])    
+            #     gymutil.draw_lines(sphere_geom_center, self.gym, self.viewer, self.envs[i], obj_center_transform)
+
+            #     goal_center_transform = gymapi.Transform()
+            #     goal_center_transform.p = gymapi.Vec3(*goal_center_pos_cpu[i])
+            #     gymutil.draw_lines(sphere_geom_center, self.gym, self.viewer, self.envs[i], goal_center_transform)
+                
+            # if hasattr(self, "fingertip_pos_rel_object"):
+            if hasattr(self, "obj_pcd"):
+                pcd, _ = sample_farthest_points(self.obj_pcd, K=16)
+                for i in range(self.num_envs):
+                    pcd_transform = gymapi.Transform()
+                    for j in range(pcd.shape[1]):
+                        pcd_transform.p = gymapi.Vec3(*pcd[i, j])
+                        gymutil.draw_lines(sphere_geom_pcd, self.gym, self.viewer, self.envs[i], pcd_transform)

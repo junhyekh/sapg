@@ -16,7 +16,8 @@ env:
   armXOfs: 1.1  # distance from the center of the table, distance between arms is 2x this
   armYOfs: 0.0
 
-  object_scale_range: [0.5, 1.5]
+  object_scale_range: [0.06, 0.15]
   mesh_object_set:
       data_path: "/input/isaac_data"
   num_object_repeats: 1
+  NumPoints: 512

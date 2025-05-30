@@ -1,6 +1,6 @@
 import os
 import math
-from typing import List
+from typing import List, Tuple
 import numpy as np
 import torch
 from isaacgym import gymapi
@@ -9,6 +9,9 @@ import tempfile
 from tqdm.auto import tqdm
 import urdfpy
 from torchvision.ops.boxes import _box_inter_union, box_area
+from xml.dom import minidom
+from icecream import ic
+from gym import spaces
 
 from isaacgymenvs.utils.torch_jit_utils import to_torch, torch_rand_float
 from isaacgymenvs.tasks.allegro_kuka.allegro_kuka_utils import DofParameters, populate_dof_properties
@@ -17,6 +20,8 @@ from isaacgymenvs.tasks.allegro_kuka.allegro_kuka_two_arms import AllegroKukaTwo
 from isaacgymenvs.tasks.allegro_kuka.allegro_kuka_utils import tolerance_curriculum, tolerance_successes_objective
 from isaacgymenvs.tasks.object.mesh_object_set import MeshObjectSet
 from isaacgymenvs.utils.torch_jit_utils import *
+
+from isaacgymenvs.tasks.allegro_kuka.unicorn import UnicornEmbedClouds, MLPEncoder
 
 class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
     """
@@ -27,10 +32,10 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
     """
     TODO:
     - [ ] Add a diverse set of objects. (JH)
-        - [ ] Add a diverse set of objects.
-        - [ ] Update keypoint offsets.
-        - [ ] Update object asset files.
-        - [ ] Connect pcd / Unicorn embedding as an input.
+        - [v] Add a diverse set of objects.
+        - [v] Update keypoint offsets.
+        - [v] Update object asset files.
+        - [v] Connect pcd / Unicorn embedding as an input.
     - [ ] Add a diverse set of obstacles. (DW)
         - [ ] Add a diverse set to the scene
         - [ ] Connect scene information (positions, sizes) to the input.
@@ -46,9 +51,85 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         self.table_asset_ids = []
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
+        self.unicorn_encoder = UnicornEmbedClouds(
+            cfg = UnicornEmbedClouds.Config(
+                encoder = MLPEncoder.Config(
+                    patch_size = 128,
+                    model_dim = 128,
+                    num_layer = 4,
+                    group_type='fps',
+                    pos_enc_type='mlp',
+                    patch_type='mlp',
+                    encoder_type='xfm',
+                    num_patch_level=4,
+                    pe_dim=32
+                ),
+                load_ckpt = 'yycho0108/pkm-obj:test-posemb-000000',
+                scale_level=2
+            ),
+            device=sim_device
+        )
+
+        # num_pcd_size 
+        n_pcd = self.cfg['env']['NumPoints']
+        self.obj_pcd = torch.zeros(self.num_envs, n_pcd, 3, 
+                                   dtype=torch.float, device=self.device)
+
+        # update observation space and state space correspondingly
+        num_dof_pos = num_dof_vel = self.num_hand_arm_dofs * self.num_arms
+
+        palm_pos_size = 3 * self.num_arms
+        palm_rot_vel_angvel_size = 10 * self.num_arms
+
+        obj_rot_vel_angvel_size = 10
+
+        fingertip_rel_pos_size = 3 * self.num_fingertips * self.num_arms
+
+        keypoints_rel_palm_size = self.num_keypoints * 3 * self.num_arms
+        keypoints_rel_goal_size = self.num_keypoints * 3
+
+        x = torch.randn(1, n_pcd, 3).to(self.unicorn_encoder.device)
+        z = self.unicorn_encoder(x)
+        object_embedding_size = np.cumprod(z.shape[-2:])[-1] # (n patches * embedding dim)
+        max_keypoint_dist_size = 1
+        lifted_object_flag_size = 1
+        progress_obs_size = 1 + 1
+        reward_obs_size = 1
+
+        self.full_state_size = (
+            num_dof_pos
+            + num_dof_vel
+            + palm_pos_size
+            + palm_rot_vel_angvel_size
+            + obj_rot_vel_angvel_size
+            + fingertip_rel_pos_size
+            + keypoints_rel_palm_size
+            + keypoints_rel_goal_size
+            + object_embedding_size
+            + max_keypoint_dist_size
+            + lifted_object_flag_size
+            + progress_obs_size
+            + reward_obs_size
+        )
+
+        num_states = self.full_state_size
+        self.num_obs_dict = {
+            "full_state": self.full_state_size,
+        }
+        self.cfg["env"]["numObservations"] = self.num_obs_dict[self.obs_type]
+        self.cfg["env"]["numStates"] = num_states
+        
+        # reallocate buffers
+        self.num_observations = self.num_obs_dict[self.obs_type]
+        self.num_states = num_states
+        self.allocate_buffers()
+        self.obs_space = spaces.Box(np.ones(self.num_obs) * -np.Inf, np.ones(self.num_obs) * np.Inf)
+        self.state_space = spaces.Box(np.ones(self.num_states) * -np.Inf, np.ones(self.num_states) * np.Inf)
+        ic(self.num_observations, self.num_states)
+        ic(self.obs_buf.shape, self.states_buf.shape)
 
     def _object_keypoint_offsets(self):
-        #TODO keypoint offsets should be different for different objects
+        # NOTE this one is not used in the current implementation
         return [
             [1, 1, 1],
             [1, 1, -1],
@@ -175,7 +256,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         object_init_state = []
         object_scales = []
         object_keypoint_offsets = []
-        
+        object_pcd = []
         self.rigid_body_name_to_idx = {}
 
         allegro_palm_handle = self.gym.find_asset_rigid_body_index(allegro_kuka_asset, "iiwa7_link_7")
@@ -255,6 +336,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             #     object_offsets.append(keypoint)
 
             object_keypoint_offsets.append(self._bbox[object_asset_idx])
+            object_pcd.append(self._cloud[object_asset_idx])
 
             # table object
             table_handle = self.gym.create_actor(env_ptr, table_asset, table_pose, "table_object", i, 0, 0)
@@ -288,7 +370,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
 
         self.object_scales = to_torch(object_scales, dtype=torch.float, device=self.device)
         self.object_keypoint_offsets = to_torch(object_keypoint_offsets, dtype=torch.float, device=self.device)
-
+        self.obj_cannoical_pcd = to_torch(object_pcd, dtype=torch.float, device=self.device)
         self._after_envs_created()
 
         try:
@@ -318,7 +400,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         scale = np.random.uniform(self.cfg["env"]["object_scale_range"][0],
                                   self.cfg["env"]["object_scale_range"][1],
                                   size=len(obj_keys))
-        object_asset_files = [self._object_set.urdf(key) for key in obj_keys]
+        
         radius = [self._object_set.radius(key) for key in obj_keys]
         rel_scale = [s/r for s, r in zip(scale, radius)]
         bbox = [self._object_set.bbox(key) for key in obj_keys]
@@ -328,10 +410,43 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         cloud = np.array([self._object_set.cloud(key) for key in obj_keys])
         self._cloud = cloud[..., :3] * np.array(rel_scale, dtype=np.float32)[:, None, None]
         self._bbox = bbox[..., np.array([0,1,-2,-1]), :]
-        print("-"*30)
-        print(f"bbox: {self._bbox.shape}")
-        print(f"bbox_pre: {bbox.shape}")
-        print("-"*30)
+        # print("-"*30)
+        # print(f"bbox: {self._bbox.shape}")
+        # print(f"bbox_pre: {bbox.shape}")
+        # print(f"bbox_pre: {bbox[0]} with rel_scale: {rel_scale[0]}, scale: {scale[0]}, radius: {radius[0]}, final_bbox: {self._bbox[0]}")
+        # print("-"*30)
+
+        object_asset_files = []
+        for idx, scale in enumerate(rel_scale):
+            key = obj_keys[idx]
+            urdf = self._object_set.urdf(key)
+            # <read and parse URDF>
+            with open(urdf, 'r', encoding='utf-8') as f:
+                str_urdf = f.read()
+            dom = minidom.parseString(str_urdf)
+
+            # <update URDF with new scale>
+            meshes = dom.getElementsByTagName("mesh")
+            for mesh in meshes:
+                mesh_scales = mesh.attributes['scale'].value.split(' ')
+                new_scale = [str(scale * float(mesh_scale))
+                             for mesh_scale in mesh_scales]
+                mesh.attributes['scale'].value = (
+                    ' '.join(new_scale)
+                )
+
+                # Also offset the origin (position) by scale
+                geom_node = mesh.parentNode.parentNode
+                origin = geom_node.getElementsByTagName('origin')
+                for o in origin:
+                    old_xyz = o.attributes['xyz'].value.split(' ')
+                    new_xyz = [str(scale * float(oo)) for oo in old_xyz]
+                    o.attributes['xyz'].value = (
+                        ' '.join(new_xyz)
+                    )
+            with open(f'{tmp_assets_dir}/{key}.urdf', "w") as f:
+                dom.writexml(f)
+            object_asset_files.append(f'{tmp_assets_dir}/{key}.urdf')
         return object_asset_files, object_asset_scales
 
 
@@ -600,6 +715,90 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             self.target_tolerance,
             self.tolerance_curriculum_increment,
         )
+
+    def compute_full_state(self, buf: Tensor) -> Tuple[int, int]:
+        self.obj_pcd[:] = self.object_pos[..., None, :] + quat_rotate_v2(
+            self.object_rot[..., None, :], self.obj_cannoical_pcd
+        )
+        num_dofs = self.num_hand_arm_dofs * self.num_arms
+        ofs: int = 0
+
+        # dof positions
+        buf[:, ofs : ofs + num_dofs] = unscale(
+            self.arm_hand_dof_pos[:, :num_dofs],
+            self.arm_hand_dof_lower_limits[:num_dofs],
+            self.arm_hand_dof_upper_limits[:num_dofs],
+        )
+        ofs += num_dofs
+
+        # dof velocities
+        buf[:, ofs : ofs + num_dofs] = self.arm_hand_dof_vel[:, :num_dofs]
+        ofs += num_dofs
+
+        # palm pos
+        num_palm_coords = 3 * self.num_arms
+        buf[:, ofs : ofs + num_palm_coords] = self.palm_center_pos.view(self.num_envs, num_palm_coords)
+        ofs += num_palm_coords
+
+        # palm rot, linvel, ang vel
+        num_palm_rot_vel_angvel = 10 * self.num_arms
+        buf[:, ofs : ofs + num_palm_rot_vel_angvel] = self._palm_state[..., 3:13].reshape(
+            self.num_envs, num_palm_rot_vel_angvel
+        )
+        ofs += num_palm_rot_vel_angvel
+
+        # object rot, linvel, ang vel
+        buf[:, ofs : ofs + 10] = self.object_state[:, 3:13]
+        ofs += 10
+
+        # fingertip pos relative to the palm of the hand
+        fingertip_rel_pos_size = 3 * self.num_arms * self.num_fingertips
+        buf[:, ofs : ofs + fingertip_rel_pos_size] = self.fingertip_pos_rel_palm.reshape(
+            self.num_envs, fingertip_rel_pos_size
+        )
+        ofs += fingertip_rel_pos_size
+
+        # keypoint distances relative to the palm of the hand
+        keypoint_rel_palm_size = 3 * self.num_arms * self.num_keypoints
+        buf[:, ofs : ofs + keypoint_rel_palm_size] = self.keypoints_rel_palm.reshape(
+            self.num_envs, keypoint_rel_palm_size
+        )
+        ofs += keypoint_rel_palm_size
+
+        # keypoint distances relative to the goal
+        keypoint_rel_pos_size = 3 * self.num_keypoints
+        buf[:, ofs : ofs + keypoint_rel_pos_size] = self.keypoints_rel_goal.reshape(
+            self.num_envs, keypoint_rel_pos_size
+        )
+        ofs += keypoint_rel_pos_size
+
+        # closest distance to the furthest of all keypoints achieved so far in this episode
+        buf[:, ofs : ofs + 1] = self.closest_keypoint_max_dist.unsqueeze(-1)
+        # print(f"closest_keypoint_max_dist: {self.closest_keypoint_max_dist[0]}")
+        ofs += 1
+
+        # indicates whether we already lifted the object from the table or not, should help the critic be more accurate
+        buf[:, ofs : ofs + 1] = self.lifted_object.unsqueeze(-1)
+        # print(f"Lifted object: {self.lifted_object[0]}")
+        ofs += 1
+
+        # this should help the critic predict the future rewards better and anticipate the episode termination
+        buf[:, ofs : ofs + 1] = torch.log(self.progress_buf / 10 + 1).unsqueeze(-1)
+        ofs += 1
+        buf[:, ofs : ofs + 1] = torch.log(self.successes + 1).unsqueeze(-1)
+        ofs += 1
+
+        # object embedding
+        z = self.unicorn_encoder(self.obj_pcd).view(self.num_envs, -1)
+        buf[:, ofs : ofs + z.shape[-1]] = z
+        ofs += z.shape[-1]
+
+        reward_obs_ofs = ofs
+        ofs += 1
+
+        assert ofs == self.full_state_size
+        return ofs, reward_obs_ofs
+        
 
     def _true_objective(self) -> Tensor:
         true_objective = tolerance_successes_objective(

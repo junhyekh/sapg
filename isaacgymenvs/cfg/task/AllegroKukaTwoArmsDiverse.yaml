@@ -1,0 +1,12 @@
+defaults:
+    - AllegroKukaTwoArms
+    - _self_
+  
+  name: AllegroKukaTwoArmsDiverse
+  
+  env:
+    object_scale_range: [0.06, 0.15]
+    mesh_object_set:
+        data_path: "/input/isaac_data"
+    num_object_repeats: 32
+       

@@ -14,7 +14,7 @@ env:
 
   envSpacing: 1.2
   episodeLength: 600
-  enableDebugVis: False
+  enableDebugVis: True
   evalStats: False  # extra evaluation-time statistics
 
   clampAbsObservations: 10.0
