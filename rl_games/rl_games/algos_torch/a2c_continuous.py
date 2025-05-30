@@ -28,6 +28,7 @@ class A2CAgent(a2c_common.ContinuousA2CBase):
             'normalize_value' : self.normalize_value,
             'normalize_input': self.normalize_input,
             'type' : 'simple' if 'learn_param' not in self.expl_type else 'extra_param',
+            'cross_attn' : params['network']['mlp'].get('cross_attn', False),
         }
         
         if self.expl_type.startswith('mixed_expl'):

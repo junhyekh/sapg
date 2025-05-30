@@ -207,7 +207,6 @@ class AllegroKukaTwoArmsBase(VecTask):
             + fingertip_rel_pos_size
             + keypoints_rel_palm_size
             + keypoints_rel_goal_size
-            + self.barrier_yzwh_size
             + object_scales_size
             + max_keypoint_dist_size
             + lifted_object_flag_size
@@ -339,8 +338,6 @@ class AllegroKukaTwoArmsBase(VecTask):
         self.goal_keypoint_pos = torch.zeros(
             (self.num_envs, self.num_keypoints, 3), dtype=torch.float, device=self.device
         )
-
-        self.barriers_xyzwh = self.table_assets_barriers_yzwh[self.table_asset_ids]
 
         # how many steps we were within the goal tolerance
         self.near_goal_steps = torch.zeros(self.num_envs, dtype=torch.int, device=self.device)
@@ -1187,9 +1184,6 @@ class AllegroKukaTwoArmsBase(VecTask):
             self.num_envs, keypoint_rel_pos_size
         )
         ofs += keypoint_rel_pos_size
-
-        buf[:, ofs : ofs + self.barrier_yzwh_size] = self.barriers_xyzwh
-        ofs += self.barrier_yzwh_size
 
         # object scales
         buf[:, ofs : ofs + 3] = self.object_scales

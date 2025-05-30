@@ -5,6 +5,8 @@ defaults:
 # TODO: try bigger network for two hands?
 params:
   network:
+    hamnet: False
+    separate: True
     mlp:
       units: [768, 512, 256]
       activation: elu
@@ -13,12 +15,14 @@ params:
         name: default
       regularizer:
         name: None
+      cross_attn: True
     rnn:
       name: lstm
-      units: 768
+      units: 256
       layers: 1
-      before_mlp: True
-      layer_norm: True
+      before_mlp: False
+      # before_mlp: True
+      layer_norm: False
 
   config:
     name: ${resolve_default:AllegroKukaTwoArmsLSTMPPO,${....experiment}}

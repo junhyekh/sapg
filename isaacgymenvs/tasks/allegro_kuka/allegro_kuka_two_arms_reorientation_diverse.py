@@ -81,7 +81,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         palm_pos_size = 3 * self.num_arms
         palm_rot_vel_angvel_size = 10 * self.num_arms
 
-        obj_rot_vel_angvel_size = 10
+        obj_state_size = 13
 
         fingertip_rel_pos_size = 3 * self.num_fingertips * self.num_arms
 
@@ -95,13 +95,14 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         lifted_object_flag_size = 1
         progress_obs_size = 1 + 1
         reward_obs_size = 1
+        self.barrier_xyzwh_size = 4 * self.cfg["env"]["barriers"]["num_barriers"]
 
         self.full_state_size = (
             num_dof_pos
             + num_dof_vel
             + palm_pos_size
             + palm_rot_vel_angvel_size
-            + obj_rot_vel_angvel_size
+            + obj_state_size
             + fingertip_rel_pos_size
             + keypoints_rel_palm_size
             + keypoints_rel_goal_size
@@ -109,6 +110,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             + max_keypoint_dist_size
             + lifted_object_flag_size
             + progress_obs_size
+            + self.barrier_yzwh_size
             + reward_obs_size
         )
 
@@ -127,6 +129,8 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         self.state_space = spaces.Box(np.ones(self.num_states) * -np.Inf, np.ones(self.num_states) * np.Inf)
         ic(self.num_observations, self.num_states)
         ic(self.obs_buf.shape, self.states_buf.shape)
+        self.barriers_xyzwh = self.table_assets_barriers_yzwh[self.table_asset_ids]
+
 
     def _object_keypoint_offsets(self):
         # NOTE this one is not used in the current implementation
@@ -747,9 +751,9 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         )
         ofs += num_palm_rot_vel_angvel
 
-        # object rot, linvel, ang vel
-        buf[:, ofs : ofs + 10] = self.object_state[:, 3:13]
-        ofs += 10
+        # object pos, rot, linvel, ang vel
+        buf[:, ofs : ofs + 13] = self.object_state[:]
+        ofs += 13
 
         # fingertip pos relative to the palm of the hand
         fingertip_rel_pos_size = 3 * self.num_arms * self.num_fingertips
@@ -787,6 +791,10 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         ofs += 1
         buf[:, ofs : ofs + 1] = torch.log(self.successes + 1).unsqueeze(-1)
         ofs += 1
+
+        # barriers
+        buf[:, ofs : ofs + self.barrier_xyzwh_size] = self.barriers_xyzwh
+        ofs += self.barrier_xyzwh_size
 
         # object embedding
         z = self.unicorn_encoder(self.obj_pcd).view(self.num_envs, -1)

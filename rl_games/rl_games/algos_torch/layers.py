@@ -4,7 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+import einops
 
+from flash_attn.modules.mha import FlashCrossAttention, MHA
 
 class NoisyLinear(nn.Linear):
     def __init__(self, in_features, out_features, sigma_init=0.017, bias=True):
@@ -80,3 +82,13 @@ class SymExp(nn.Module):
 
     def forward(self, input):
         return symexp(input) 
+    
+
+class MHAWrapper(MHA):
+    def forward(self, q, m):
+        s = q.shape
+        q = einops.rearrange(q, '... s d -> (...) s d')
+        m = einops.rearrange(m, '... s d -> (...) s d')
+        o = super().forward(q, m)
+        o = o.reshape(*s[:-2], *o.shape[-2:])
+        return o

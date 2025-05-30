@@ -8,6 +8,8 @@ from rl_games.algos_torch.d2rl import D2RLNet
 from rl_games.algos_torch.sac_helper import  SquashedNormal
 from rl_games.common.layers.recurrent import  GRUWithDones, LSTMWithDones
 from rl_games.common.layers.value import  TwoHotEncodedValue, DefaultValue
+from rl_games.algos_torch.layers import MHAWrapper
+from rl_games.algos_torch.hamnet import RangeActorCritic
 
 
 def _create_initializer(func, **kwargs):
@@ -66,12 +68,18 @@ class NetworkBuilder:
         def get_default_rnn_state(self):
             return None
 
-        def _calc_input_size(self, input_shape,cnn_layers=None):
+        def _calc_input_size(self, input_shape,cnn_layers=None,
+                             cross_attn=False,
+                             cross_attn_dim=None):
             if cnn_layers is None:
                 assert(len(input_shape) == 1)
                 return input_shape[0]
             else:
-                return nn.Sequential(*cnn_layers)(torch.rand(1, *(input_shape))).flatten(1).data.size(1)
+                res = nn.Sequential(*cnn_layers)(torch.rand(1, *(input_shape))).flatten(1).data.size(1)
+                if cross_attn:
+                    return res - cross_attn_dim + 128
+                else:
+                    return res
 
         def _noisy_dense(self, inputs, units):
             return layers.NoisyFactorizedLinear(inputs, units)
@@ -109,6 +117,26 @@ class NetworkBuilder:
                     layers.append(torch.nn.BatchNorm1d(unit))
                 in_size = unit
 
+            return nn.Sequential(*layers)
+
+        def _build_mlpv2(self, input_size, units, 
+                         activation, dense_func,
+                         last_layer_activation = False,
+                         norm_func_name = None):
+            layers = []
+            for unit in units[:-1]:
+                layers.append(dense_func(input_size, unit))
+                if norm_func_name == 'layer_norm':
+                    layers.append(torch.nn.LayerNorm(unit))
+                elif norm_func_name == 'batch_norm':
+                    layers.append(torch.nn.BatchNorm1d(unit))
+                else:
+                    layers.append(torch.nn.Identity())
+                layers.append(self.activations_factory.create(activation))
+                input_size = unit
+            layers.append(dense_func(input_size, units[-1]))
+            if last_layer_activation:
+                layers.append(self.activations_factory.create(activation))
             return nn.Sequential(*layers)
 
         def _build_mlp(self, 
@@ -195,12 +223,45 @@ class A2CBuilder(NetworkBuilder):
             self.num_seqs = num_seqs = kwargs.pop('num_seqs', 1)
             self.net_type = kwargs.pop('type', 'simple')
 
+            self.cross_attn = kwargs.pop('cross_attn', False)
+
             NetworkBuilder.BaseNetwork.__init__(self)
             self.load(params)
             self.actor_cnn = nn.Sequential()
             self.critic_cnn = nn.Sequential()
             self.actor_mlp = nn.Sequential()
             self.critic_mlp = nn.Sequential()
+
+            if self.cross_attn:
+                self.cross_attn_dim = kwargs.pop('cross_attn_dim', 256)
+                self.cross_attn_heads = kwargs.pop('cross_attn_heads', 8)
+                self.kv_start = kwargs.pop('kv_start', 203)
+                self.kv_dim = kwargs.pop('kv_dim', 2176)
+                self.proj_kv = self._build_mlpv2(128, 
+                                                [self.cross_attn_dim], 
+                                                'gelu', torch.nn.Linear,
+                                                last_layer_activation=True,
+                                                norm_func_name='layer_norm')
+                self.q_start = kwargs.pop('q_start', 118)
+                self.q_dim = kwargs.pop('q_dim', 13)
+                self.proj_q = self._build_mlpv2(self.q_dim, 
+                                                [self.cross_attn_dim], 
+                                                'gelu', torch.nn.Linear,
+                                                last_layer_activation=True,
+                                                norm_func_name='layer_norm')
+                self.proj_out = self._build_mlpv2(self.cross_attn_dim, 
+                                                [self.cross_attn_dim,
+                                                 128], 
+                                                'gelu', torch.nn.Linear,
+                                                last_layer_activation=False,
+                                                norm_func_name='layer_norm')
+                self.mha = MHAWrapper(self.cross_attn_dim,
+                                      self.cross_attn_heads,
+                                      cross_attn=True,
+                                      use_flash_attn=True,
+                                      )
+            else:
+                self.kv_dim = 0
             
             if self.net_type == 'extra_param':
                 self.param_ids = kwargs['coef_ids']
@@ -225,8 +286,9 @@ class A2CBuilder(NetworkBuilder):
                 if self.separate:
                     self.critic_cnn = self._build_conv( **cnn_args)
 
-            mlp_input_shape = self._calc_input_size(input_shape, self.actor_cnn)
-
+            mlp_input_shape = self._calc_input_size(input_shape, self.actor_cnn,
+                                                    self.cross_attn,
+                                                    self.kv_dim)
             in_mlp_shape = mlp_input_shape
             if len(self.units) == 0:
                 out_size = mlp_input_shape
@@ -253,23 +315,32 @@ class A2CBuilder(NetworkBuilder):
                     self.rnn = self._build_rnn(self.rnn_name, rnn_in_size, self.rnn_units, self.rnn_layers)
                     if self.rnn_ln:
                         self.layer_norm = torch.nn.LayerNorm(self.rnn_units)
+            if not self.hamnet:
+                mlp_args = {
+                    'input_size' : in_mlp_shape, 
+                    'units' : self.units, 
+                    'activation' : self.activation, 
+                    'norm_func_name' : self.normalization,
+                    'dense_func' : torch.nn.Linear,
+                    'd2rl' : self.is_d2rl,
+                    'norm_only_first_layer' : self.norm_only_first_layer
+                }
+                self.actor_mlp = self._build_mlp(**mlp_args)
+                if self.separate:
+                    self.critic_mlp = self._build_mlp(**mlp_args)
 
-            mlp_args = {
-                'input_size' : in_mlp_shape, 
-                'units' : self.units, 
-                'activation' : self.activation, 
-                'norm_func_name' : self.normalization,
-                'dense_func' : torch.nn.Linear,
-                'd2rl' : self.is_d2rl,
-                'norm_only_first_layer' : self.norm_only_first_layer
-            }
-            self.actor_mlp = self._build_mlp(**mlp_args)
-            if self.separate:
-                self.critic_mlp = self._build_mlp(**mlp_args)
-
+            else:
+                self.hamnet = RangeActorCritic(self.hamnet_n_module, False, False,
+                                               mod_dims=[in_mlp_shape, *self.hamnet_mod_dims],
+                                               actor_kwds=dict(
+                                                   dims=[in_mlp_shape, *self.units],
+                                               ),
+                                               critic_kwds=dict(
+                                                   dims=[in_mlp_shape, *self.units],
+                                               ))
+                assert self.separate
             self.value = self._build_value_layer(out_size, self.value_size)
             self.value_act = self.activations_factory.create(self.value_activation)
-
             if self.is_discrete:
                 self.logits = torch.nn.Linear(out_size, actions_num)
             '''
@@ -323,6 +394,21 @@ class A2CBuilder(NetworkBuilder):
             dones = obs_dict.get('dones', None)
             bptt_len = obs_dict.get('bptt_len', 0)
 
+            if self.cross_attn:
+                with torch.cuda.amp.autocast(True,
+                                             torch.float16):
+                    kv = obs[:, self.kv_start:self.kv_start + self.kv_dim]
+                    # FIXME: hardcoded 128
+                    kv = kv.reshape(*kv.shape[:-1], -1, 128)
+                    kv = self.proj_kv(kv)
+                    q = self.proj_q(obs[:, None,
+                                        self.q_start:self.q_start + self.q_dim])
+                    out = self.mha(q, kv)
+                out = self.proj_out(out.to(torch.float32)).squeeze(-2)
+                obs = torch.cat([obs[:, :self.kv_start], 
+                                 obs[:, self.kv_start + self.kv_dim:],
+                                 out], dim=1)
+
             if self.has_cnn:
                 # for obs shape 4
                 # input expected shape (B, W, H, C)
@@ -344,8 +430,12 @@ class A2CBuilder(NetworkBuilder):
                     if not self.is_rnn_before_mlp:
                         a_out_in = a_out
                         c_out_in = c_out
-                        a_out = self.actor_mlp(a_out_in)
-                        c_out = self.critic_mlp(c_out_in)
+                        if self.hamnet:
+                            # FIXME: assume no cnn before mlp
+                            a_out, c_out = self.hamnet(a_out_in, a_out_in)
+                        else:
+                            a_out = self.actor_mlp(a_out_in)
+                            c_out = self.critic_mlp(c_out_in)
 
                         if self.rnn_concat_input:
                             a_out = torch.cat([a_out, a_out_in], dim=1)
@@ -386,8 +476,11 @@ class A2CBuilder(NetworkBuilder):
                     states = a_states + c_states
 
                     if self.is_rnn_before_mlp:
-                        a_out = self.actor_mlp(a_out)
-                        c_out = self.critic_mlp(c_out)
+                        if self.hamnet:
+                            a_out, c_out = self.hamnet(a_out, a_out)
+                        else:
+                            a_out = self.actor_mlp(a_out)
+                            c_out = self.critic_mlp(c_out)
                 else:
                     a_out = self.actor_mlp(a_out)
                     c_out = self.critic_mlp(c_out)
@@ -516,6 +609,11 @@ class A2CBuilder(NetworkBuilder):
             self.has_space = 'space' in params
             self.central_value = params.get('central_value', False)
             self.joint_obs_actions_config = params.get('joint_obs_actions', None)
+
+            self.hamnet = params.get('hamnet', False)
+            if self.hamnet:
+                self.hamnet_n_module = params.get('hamnet_n_module', 4)
+                self.hamnet_mod_dims = params.get('hamnet_mod_dims', [256, 128, 64])
 
             if self.has_space:
                 self.is_multi_discrete = 'multi_discrete'in params['space']

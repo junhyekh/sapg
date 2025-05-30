@@ -59,7 +59,7 @@ def add_experiment_args(parser):
     parser.add_argument("--time-str", default=None, type=str, help="Time string")
     parser.add_argument("--sapg", action='store_true', help="SAPG")
     parser.add_argument("--extra-args", nargs='*', help="Extra args") # Of the form --key a1=value1 --key a2=value2
-
+    parser.add_argument("--hamnet", action='store_true', help="HAMNet")
 
     partial_cfg, _ = parser.parse_known_args(sys.argv[1:])
 
@@ -125,6 +125,7 @@ def get_experiment_run_description(args):
            + (f'train.params.config.expl_type={args.expl_type} train.params.config.expl_reward_type={args.ir_type} train.params.config.expl_coef_block_size={args.num_envs // (args.num_expl_coef_blocks or args.num_policies)} train.params.config.expl_reward_coef_scale={args.ir_coef_scale} ')
            + (f'train.params.config.expl_reward_coef_embd_size={args.ir_embd_sz} ' if args.ir_embd_sz else '')
            + (f'train.params.network.space.continuous.fixed_sigma={args.sigma} ')
+           + (f'train.params.network.hamnet={args.hamnet} ' if args.hamnet else '')
            + (f'checkpoint={args.checkpoint} ' if args.checkpoint else '')
            + (" ".join(args.extra_args) + " " if args.extra_args else "")
            + f'wandb_project={args.wandb_project}_{name_prefix} wandb_entity={args.wandb_entity} wandb_activate={not args.wandb_deactivate} wandb_group={name_suffix} wandb_tags={args.wandb_tags} ++wandb_notes=\'{args.wandb_notes}\'')
