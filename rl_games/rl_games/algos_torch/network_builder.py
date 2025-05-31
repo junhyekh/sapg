@@ -331,7 +331,7 @@ class A2CBuilder(NetworkBuilder):
 
             else:
                 self.hamnet = RangeActorCritic(self.hamnet_n_module, False, False,
-                                               mod_dims=[in_mlp_shape, *self.hamnet_mod_dims],
+                                               mod_dims=[mlp_input_shape, *self.hamnet_mod_dims],
                                                actor_kwds=dict(
                                                    dims=[in_mlp_shape, *self.units],
                                                ),
@@ -477,7 +477,7 @@ class A2CBuilder(NetworkBuilder):
 
                     if self.is_rnn_before_mlp:
                         if self.hamnet:
-                            a_out, c_out = self.hamnet(a_out, a_out)
+                            a_out, c_out = self.hamnet(obs, a_out, c_out)
                         else:
                             a_out = self.actor_mlp(a_out)
                             c_out = self.critic_mlp(c_out)

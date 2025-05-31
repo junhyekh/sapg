@@ -31,8 +31,7 @@ from pytorch3d.loss import chamfer_distance
 from pytorch3d.ops.knn import knn_points, knn_gather
 from pytorch3d.ops.sample_farthest_points import sample_farthest_points
 from isaacgymenvs.tasks.allegro_kuka.util import merge_shapes
-from pkm.util.config import recursive_replace_map, ConfigBase
-from pkm.util.torch_util import dcn
+from isaacgymenvs.tasks.allegro_kuka.util import merge_shapes, recursive_replace_map
 
 from icecream import ic
 
@@ -163,7 +162,7 @@ def subsample(x: th.Tensor, n: int,
 
 class PointMAESelfAttention(nn.Module):
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         hidden_size: int = 128
         num_attention_heads: int = 4
         qkv_bias: bool = True
@@ -318,7 +317,7 @@ class PointMAESelfOutput(nn.Module):
     """
 
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         hidden_size: int = 128
         hidden_dropout_prob: float = 0.0
 
@@ -339,7 +338,7 @@ class PointMAESelfOutput(nn.Module):
 # ViT->ViTMAE
 class PointMAEAttention(nn.Module):
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         self_attn: PointMAESelfAttention.Config = PointMAESelfAttention.Config()
         output: PointMAESelfOutput.Config = PointMAESelfOutput.Config()
 
@@ -369,7 +368,7 @@ class PointMAEAttention(nn.Module):
 # Copied from transformers.models.vit.modeling_vit.ViTIntermediate ViT->ViTMAE
 class PointMAEIntermediate(nn.Module):
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         hidden_size: int = 128
         intermediate_size: int = 128
         hidden_act: str = 'gelu'
@@ -392,7 +391,7 @@ class PointMAEIntermediate(nn.Module):
 # Copied from transformers.models.vit.modeling_vit.ViTOutput ViT->ViTMAE
 class PointMAEOutput(nn.Module):
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         intermediate_size: int = 128
         hidden_size: int = 128
         hidden_dropout_prob: float = 0.0
@@ -417,7 +416,7 @@ class PointMAELayer(nn.Module):
     """This corresponds to the Block class in the timm implementation."""
 
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         attention: PointMAEAttention.Config = PointMAEAttention.Config()
         intermediate: PointMAEIntermediate.Config = PointMAEIntermediate.Config()
         output: PointMAEOutput.Config = PointMAEOutput.Config()
@@ -497,7 +496,7 @@ class PointMAELayer(nn.Module):
 
 class PointMAEEncoder(nn.Module):
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         layer: PointMAELayer.Config = PointMAELayer.Config()
         num_hidden_layers: int = 4
         use_adapter: bool = False
@@ -547,7 +546,7 @@ class PointMAEEncoder(nn.Module):
 
 class PointMAEDecoder(nn.Module):
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         layer: PointMAELayer.Config = PointMAELayer.Config()
         num_hidden_layers: int = 4
         hidden_size: int = 128
@@ -752,7 +751,7 @@ class KNNPatchEncoder(nn.Module):
 
 class MLPPatchEncoder(nn.Module):
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         hidden: Tuple[int, ...] = (256, 256)
         sort: bool = False
         pre_ln_bias: bool = False
@@ -1130,7 +1129,7 @@ def get_patch_module(patch_type: str, embed_size: int,
 
 class PointMAE(nn.Module):
     @dataclass
-    class Config(ConfigBase):
+    class Config:
         mask_ratio: float = 0.0
         patch_size: int = 32
         encoder_channel: int = 128

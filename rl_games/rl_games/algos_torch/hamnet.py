@@ -389,7 +389,8 @@ class RangeActorCritic(nn.Module):
 
     def forward(self,
                 z: th.Tensor,
-                x: th.Tensor):
+                x: th.Tensor,
+                c: Optional[th.Tensor] = None):
         batch_shape = z.shape[:-1]
 
         # flatten batch dims
@@ -413,9 +414,10 @@ class RangeActorCritic(nn.Module):
             x, q_a[::2], q_a[1::2], p_a[::2], p_a[1::2], g_a
         )
         y_a = y_a.view(*batch_shape, y_a.shape[-1])
-
+        if c is None:
+            c = x
         y_c = self.critic_executor(
-            x, q_c[::2], q_c[1::2], p_c[::2], p_c[1::2], g_c
+            c, q_c[::2], q_c[1::2], p_c[::2], p_c[1::2], g_c
         )
         y_c = y_c.view(*batch_shape, y_c.shape[-1])
         return (y_a, y_c)

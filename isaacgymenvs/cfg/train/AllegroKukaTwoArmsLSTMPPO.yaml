@@ -9,6 +9,7 @@ params:
     separate: True
     mlp:
       units: [768, 512, 256]
+      # units: [576, 384, 192]
       activation: elu
       d2rl: False
       initializer:
@@ -18,11 +19,10 @@ params:
       cross_attn: True
     rnn:
       name: lstm
-      units: 256
+      units: 768
       layers: 1
-      before_mlp: False
-      # before_mlp: True
-      layer_norm: False
+      before_mlp: True
+      layer_norm: True
 
   config:
     name: ${resolve_default:AllegroKukaTwoArmsLSTMPPO,${....experiment}}
