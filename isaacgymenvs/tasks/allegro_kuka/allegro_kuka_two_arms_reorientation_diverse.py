@@ -282,7 +282,7 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
         self.object_indices = torch.empty(self.num_envs, dtype=torch.long, device=self.device)
 
         assert self.num_envs >= 1
-        for i in range(self.num_envs):
+        for i in tqdm(range(self.num_envs), desc='create_envs'):
             # create env instance
             env_ptr = self.gym.create_env(self.sim, lower, upper, num_per_row)
             agg_bodies = max_agg_bodies
@@ -294,16 +294,18 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
             agg_bodies += object_rb_count[object_asset_idx]
             agg_shapes += object_shapes_count[object_asset_idx]
 
-            # add table
+            # # add table
             table_asset_idx = i % len(table_assets)
             table_asset = table_assets[table_asset_idx]
-            agg_bodies += table_rb_count[table_asset_idx]
-            agg_shapes += table_shapes_count[table_asset_idx]
+            # agg_bodies += table_rb_count[table_asset_idx]
+            # agg_shapes += table_shapes_count[table_asset_idx]
             self.table_asset_ids.append(table_asset_idx)
 
-            # add auxiliary objects
-            agg_bodies += object_rb_count[object_asset_idx]
-            agg_shapes += object_shapes_count[object_asset_idx]
+            print(f"agg_bodies: {agg_bodies}, agg_shapes: {agg_shapes}")
+
+            # # add auxiliary objects
+            # agg_bodies += object_rb_count[object_asset_idx]
+            # agg_shapes += object_shapes_count[object_asset_idx]
             
             self.gym.begin_aggregate(env_ptr, agg_bodies, agg_shapes, True)
 
@@ -448,6 +450,11 @@ class AllegroKukaTwoArmsReorientationDiverse(AllegroKukaTwoArmsBase):
                     o.attributes['xyz'].value = (
                         ' '.join(new_xyz)
                     )
+                #convert filename vis.obj to col.obj for fast loading in urdf
+                obj_filename = mesh.attributes['filename'].value
+                obj_filename = obj_filename.replace('vis.obj', 'col.obj')
+                mesh.attributes['filename'].value = obj_filename
+            # print the urdf
             with open(f'{tmp_assets_dir}/{key}.urdf', "w") as f:
                 dom.writexml(f)
             object_asset_files.append(f'{tmp_assets_dir}/{key}.urdf')
